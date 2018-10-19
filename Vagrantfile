@@ -71,33 +71,34 @@ Vagrant.configure(2) do |config|
 
   config.hostmanager.enabled = true
 
+  config.vm.synced_folder ".", "/vagrant", type: "virtualbox", disabled: false,
+  rsync__exclude: ".git/"
+
   $centos_box = "centos/7"
   $fedora_box ="fedora/27-cloud-base"
 
-  #config.vm.box = $current_box 
+  $script_host_file = <<SCRIPT
+	echo I provisioning host file...
+  sudo cp /vagrant/config/hosts /etc/hosts
+SCRIPT
 
-  #config.vm.synced_folder "./vagrant_data/", "/home/vagrant/sync", type: "virtualbox"
+# Configure new ssh key for server and creates a copy for the rest of the servers.
+$script_ssh_credentials_creation = <<SCRIPT
+        echo "Creating and updateing credentials for direct ssh"
+        if [ ! -f /home/vagrant/.ssh/id_rsa.pub ]; then
+          ssh-keygen -t rsa -N "" -f /home/vagrant/.ssh/id_rsa
+        fi
 
-  config.vm.define "control", primary: true do |controlserver|
-    
-    controlserver.vm.box = $centos_box
+        cp /home/vagrant/.ssh/id_rsa.pub /vagrant/control.pub
 
-    controlserver.vm.network "private_network", ip: "192.168.135.10"
-
-    $script = <<SCRIPT
-	echo Updateing credentials
-	if [ ! -f /home/vagrant/.ssh/id_rsa ]; then
-	      ssh-keygen -t rsa -N "" -f /home/vagrant/.ssh/id_rsa
-	fi
-         cp /home/vagrant/.ssh/id_rsa.pub /vagrant/control.pub
-
-         cat << 'SSHEOF' > /home/vagrant/.ssh/config
-	 Host *
-	 StrictHostKeyChecking no
-	 UserKnownHostsFile=/dev/null
+        cat << 'SSHEOF' > /home/vagrant/.ssh/config
+        Host *
+        StrictHostKeyChecking no
+        UserKnownHostsFile=/dev/null
 SSHEOF
         chown -R vagrant:vagrant /home/vagrant/.ssh/
 SCRIPT
+
 
     $script_copy_key = 'cat /vagrant/control.pub >> /home/vagrant/.ssh/authorized_keys'
 
@@ -119,60 +120,80 @@ SCRIPT
 	# 
 	cd /usr/local/src
 	sudo yum install -y git python-jinja2 python-paramiko PyYAML make MySQL-python
-        sudo yum upgrade python-setuptools
+  	sudo yum upgrade -y python-setuptools
 	sudo yum install -y python-pip python-wheel
 	sudo yum install -y python-setuptools
-	
-	sudo git clone https://github.com/ansible/ansible.git
-	cd /usr/local/src/ansible
-	sudo git submodule update --init --recursive
-	sudo make install
+  	sudo yum install -y epel-release
+  	sudo yum install -y ansible
 
+	
 SCRIPT
 
+  #config.vm.box = $current_box 
+
+  #config.vm.synced_folder "./vagrant_data/", "/home/vagrant/sync", type: "virtualbox"
+
+  config.vm.define "bastion", primary: true do |controlserver|
+    
+    controlserver.vm.box = $centos_box
+    controlserver.vm.hostname = "bastion"
+    controlserver.vm.network "private_network", ip: "192.168.135.10"
+
+    config.vm.provider :virtualbox do |vb|
+      vb.customize ["modifyvm", :id, "--memory", "512"]
+      vb.customize ["modifyvm", :id, "--cpus", "1"]
+    end
+   
     # Configures new ssh key for server and creates a copy for the rest of the servers.
-    controlserver.vm.provision "shell", inline: $script 
+    controlserver.vm.provision "shell", inline: $script_ssh_credentials_creation 
 
     # Install Ansible in control server  
-    controlserver.vm.provision "shell", inline: $script_install_ansible
+    #controlserver.vm.provision "shell", inline: $script_install_ansible
+
+    # Provision hosts file
+    controlserver.vm.provision "shell", inline: $script_host_file
     
     # Copy ansible playbook and roles. 
-    controlserver.vm.provision "file", source: "./ansible/" , destination: "$HOME/ansible/"
-  end
-
-  config.vm.define "loadbalance-service" do |loadbalanceserver|
-    loadbalanceserver.vm.box = $centos_box
-    loadbalanceserver.vm.network "private_network", ip: "192.168.135.101"
-    loadbalanceserver.vm.hostname = "loadbalance-service"
-    loadbalanceserver.vm.provision 'shell', inline: $script_copy_key
+    #controlserver.vm.provision "file", source: "./ansible/" , destination: "$HOME/ansible/"
   end
 
   config.vm.define "master-service-1" do |masterserver1|
    masterserver1.vm.box = $centos_box
    masterserver1.vm.network "private_network", ip: "192.168.135.111"
-   masterserver1.vm.hostname = "master-service1"
+   masterserver1.vm.hostname = "k8s-master"
+   config.vm.provider :virtualbox do |vb|
+      vb.customize ["modifyvm", :id, "--memory", "2048"]
+      vb.customize ["modifyvm", :id, "--cpus", "2"]
+    end
    masterserver1.vm.provision 'shell', inline: $script_copy_key
+   # Provision hosts file
+   masterserver1.vm.provision "shell", inline: $script_host_file
   end		      
-
-  config.vm.define "master-service-2" do |masterserver2|
-    masterserver2.vm.box = $centos_box
-    masterserver2.vm.network "private_network", ip: "192.168.135.112"
-    masterserver2.vm.hostname = "web-service"
-    masterserver2.vm.provision 'shell', inline: $script_copy_key
-  end
 
   config.vm.define "node-service-1" do |nodeseserver1|
     nodeseserver1.vm.box = $centos_box
     nodeseserver1.vm.network "private_network", ip: "192.168.135.121"
-    nodeseserver1.vm.hostname = "node-service-1"
+    nodeseserver1.vm.hostname = "worker-node-1"
+    config.vm.provider :virtualbox do |vb|
+      vb.customize ["modifyvm", :id, "--memory", "2048"]
+      vb.customize ["modifyvm", :id, "--cpus", "1"]
+    end
     nodeseserver1.vm.provision 'shell', inline: $script_copy_key
+    # Provision hosts file
+    nodeseserver1.vm.provision "shell", inline: $script_host_file
   end
 
   config.vm.define "node-service--2" do |nodeserver2|
     nodeserver2.vm.box = $centos_box
     nodeserver2.vm.network "private_network", ip: "192.168.135.122"
-    nodeserver2.vm.hostname = "node-service-2"
+    nodeserver2.vm.hostname = "worker-node-2"
+    config.vm.provider :virtualbox do |vb|
+      vb.customize ["modifyvm", :id, "--memory", "2048"]
+      vb.customize ["modifyvm", :id, "--cpus", "1"]
+    end
     nodeserver2.vm.provision 'shell', inline: $script_copy_key
+    # Provision hosts file
+    nodeserver2.vm.provision "shell", inline: $script_host_file
   end
 
 end
